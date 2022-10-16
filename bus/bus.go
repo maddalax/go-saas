@@ -1,6 +1,8 @@
 package bus
 
-import "errors"
+import (
+	"errors"
+)
 
 type Options struct {
 	AddDefaultMiddleware bool
@@ -30,12 +32,14 @@ func (bus *EventBus[T, V]) Listen(handler func(T) error) {
 	if bus.listeners == nil {
 		bus.listeners = make([]func(T) error, 0)
 	}
+
 	bus.listeners = append(bus.listeners, handler)
 }
 
 func (bus *EventBus[T, V]) addDefaultMiddleware() {
 	middlewares := []func(T){
-		eventLoggerMiddleware[T],
+		consoleLoggerMiddleware[T],
+		fileLoggerMiddleware[T],
 	}
 	bus.middleware = middlewares
 }
@@ -61,12 +65,15 @@ func (bus *EventBus[T, V]) Dispatch(payload T) (*V, error) {
 	if err != nil {
 		return new(V), err
 	}
-	for i := range bus.listeners {
-		err := bus.listeners[i](payload)
-		if err != nil {
-			// TODO add error logging here
-			continue
+
+	for _, listener := range bus.listeners {
+		Processes <- Job{
+			callback: func() error {
+				return listener(payload)
+			},
+			tries: 0,
 		}
 	}
+
 	return &result, nil
 }
