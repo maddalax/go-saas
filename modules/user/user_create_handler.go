@@ -1,9 +1,8 @@
 package user
 
 import (
-	"context"
-	"saas-starter/db"
 	"saas-starter/events"
+	"time"
 )
 
 func CreateHandler(payload events.CreateUserPayload) (events.UserCreatedPayload, error) {
@@ -17,13 +16,7 @@ type Book struct {
 }
 
 func EmailHandler(payload events.CreateUserPayload) error {
-	book := &Book{Title: payload.Name}
-
-	_, err := db.GetDatabase().NewInsert().Model(book).Exec(context.Background())
-
-	if err != nil {
-		return err
-	}
-
+	println("HERE!: " + payload.Name)
+	time.Sleep(time.Millisecond * 1000)
 	return nil
 }

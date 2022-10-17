@@ -2,6 +2,7 @@ package bus
 
 import (
 	"errors"
+	"saas-starter/job"
 )
 
 type Options struct {
@@ -13,6 +14,8 @@ func CreateWithOptions[T any, V any](opts Options) EventBus[T, V] {
 	if opts.AddDefaultMiddleware {
 		bus.addDefaultMiddleware()
 	}
+	bus.queue = job.CreateQueue[T]()
+	go bus.queue.Listen()
 	return bus
 }
 
@@ -23,6 +26,7 @@ func Create[T any, V any]() EventBus[T, V] {
 }
 
 type EventBus[T any, V any] struct {
+	queue         job.Queue[T]
 	listeners     []func(T) error
 	middleware    []func(T)
 	resultHandler func(T) (V, error)
@@ -34,6 +38,7 @@ func (bus *EventBus[T, V]) Listen(handler func(T) error) {
 	}
 
 	bus.listeners = append(bus.listeners, handler)
+	bus.queue.AddHandler(handler)
 }
 
 func (bus *EventBus[T, V]) addDefaultMiddleware() {
@@ -66,14 +71,7 @@ func (bus *EventBus[T, V]) Dispatch(payload T) (*V, error) {
 		return new(V), err
 	}
 
-	for _, listener := range bus.listeners {
-		Processes <- Job{
-			callback: func() error {
-				return listener(payload)
-			},
-			tries: 0,
-		}
-	}
+	bus.queue.Enqueue(payload)
 
 	return &result, nil
 }
