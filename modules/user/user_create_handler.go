@@ -16,7 +16,11 @@ type Book struct {
 }
 
 func EmailHandler(payload events.CreateUserPayload) error {
-	println("HERE!: " + payload.Name)
+	time.Sleep(time.Millisecond * 1000)
+	return nil
+}
+
+func ActivationHandler(payload events.CreateUserPayload) error {
 	time.Sleep(time.Millisecond * 1000)
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 *
 Maximum number of jobs that can be run in parallel
 */
-const maxConcurrency = 50
+const maxConcurrency = 250
 
 /*
 *

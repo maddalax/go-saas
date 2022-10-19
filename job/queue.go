@@ -2,12 +2,12 @@ package job
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/driver/pgdriver"
 	"saas-starter/db"
+	"time"
 )
 
 type RawJob struct {
@@ -28,113 +28,111 @@ type Job[T any] struct {
 }
 
 type Queue[T any] struct {
-	maxWorkers int
-	maxBuffer  int
-	semaphore  chan bool
-	workers    chan bool
-	handlers   []func(T) error
-	stop       chan bool
-	context    context.Context
-	cancel     context.CancelFunc
+	listenerChan chan bool
+	workers      int
+	processors   []Processor[T]
+	stop         chan bool
+	context      context.Context
+	cancel       context.CancelFunc
 }
 
-func CreateQueue[T any]() Queue[T] {
-	maxWorkers := 100
-	maxBuffer := 10000
-	ctx, cancel := context.WithCancel(context.Background())
-	queue := Queue[T]{
-		maxWorkers: maxWorkers,
-		maxBuffer:  10000,
-		semaphore:  make(chan bool, maxWorkers),
-		workers:    make(chan bool, maxBuffer),
-		handlers:   make([]func(T) error, 0),
-		context:    ctx,
-		cancel:     cancel,
+type CreateOptions struct {
+	Workers int
+}
+
+// ListenerChanBuffer The total amount of messages the job change listener can hold into memory at once. These messages are
+// just a notification to tell a worker to query for any new jobs, it does not contain any job data.
+// This is useful because if we know that we have 2500 jobs to run, send these 2500 messages to the workers to tell them
+// to query for new jobs 2500 times, therefore running all jobs without having for them to manually poll./*
+const ListenerChanBuffer = 10000
+
+func CreateQueue[T any](options CreateOptions) Queue[T] {
+
+	if options.Workers == 0 {
+		options.Workers = 25
 	}
-	queue.startWorkers(queue.context)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	processors := make([]Processor[T], options.Workers)
+
+	for i := range processors {
+		processors[i] = createProcessor[T](i)
+	}
+
+	queue := Queue[T]{
+		listenerChan: make(chan bool, ListenerChanBuffer),
+		workers:      options.Workers,
+		processors:   processors,
+		context:      ctx,
+		cancel:       cancel,
+	}
+
+	for _, processor := range processors {
+		go processor.Start(queue.listenerChan)
+	}
+
+	queue.startPoller()
+
 	return queue
 }
 
 func (queue Queue[T]) AddHandler(handler func(T) error) {
-	queue.handlers = append(queue.handlers, handler)
-	// TODO logging
-	println("handlers changed, restarting workers.")
-	queue.restartWorkers()
-}
-
-func (queue Queue[T]) restartWorkers() {
-	queue.cancel()
-	ctx, cancel := context.WithCancel(context.Background())
-	queue.context = ctx
-	queue.cancel = cancel
-	for len(queue.semaphore) > 0 {
-		<-queue.semaphore
+	for _, processor := range queue.processors {
+		processor.AddHandler(handler)
 	}
-	queue.startWorkers(queue.context)
 }
 
+/*
+*
+Poll the jobs table every minute to check the count to see if there are any jobs
+we need to process. This is useful for if messages get missed / dropped from the
+pg_notify call.
+*/
+func (queue Queue[T]) startPoller() {
+	go func() {
+		for {
+			println(fmt.Sprintf("len of listener chan: %d", len(queue.listenerChan)))
+			time.Sleep(time.Second)
+		}
+	}()
+
+	go func() {
+		for {
+			count, err := db.GetDatabase().NewSelect().Model(&RawJob{}).Count(context.Background())
+			if err != nil {
+				println(err.Error())
+				// TODO logging
+				continue
+			}
+			diff := count - len(queue.listenerChan)
+			// Ensure we don't send more than the max limit of the channel
+			// TODO also we should drain the channel if its more than count and just set it to count
+			if diff > ListenerChanBuffer {
+				diff = ListenerChanBuffer
+			}
+			println(fmt.Sprintf("len of listener chan: %d, job count: %d, diff: %d", len(queue.listenerChan), count, diff))
+			for i := 0; i < diff; i++ {
+				queue.listenerChan <- true
+			}
+			time.Sleep(time.Minute)
+		}
+	}()
+}
+
+// Listen Start listening for pg changes for the exact event and notify our queue that the table has changed.
+// The queue will notify the workers and a random worker will then know to pick up a new job/*
 func (queue Queue[T]) Listen() {
 	event := fmt.Sprintf("%T", *new(T))
 	ln := pgdriver.NewListener(db.GetDatabase())
 	key := "jobs:changed:" + event
-	println("adding pg job listener: " + key)
 	if err := ln.Listen(context.Background(), key); err != nil {
 		panic(err)
 	}
+	c := queue.listenerChan
+	// postgres jobs table has changed
 	for range ln.Channel() {
-		queue.workers <- true
-	}
-}
-
-func (queue Queue[T]) startWorkers(ctx context.Context) {
-	for i := 0; i < queue.maxWorkers; i++ {
-		queue.semaphore <- true
-	}
-	for i := 0; i < queue.maxWorkers; i++ {
-		go func(ctx context.Context) {
-			for {
-				select {
-				case <-queue.workers:
-					queue.process()
-				case <-ctx.Done():
-					return
-				}
-			}
-		}(ctx)
-	}
-}
-
-func (queue Queue[T]) process() {
-	println("grabbing job")
-	err := db.GetDatabase().RunInTx(context.Background(), &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
-		_, err := tx.Exec("BEGIN")
-		if err != nil {
-			return err
-		}
-		raw := RawJob{}
-		err = tx.NewRaw("SELECT * FROM jobs LIMIT 1 FOR UPDATE SKIP LOCKED;").Scan(ctx, &raw)
-		if err != nil {
-			return err
-		}
-
-		job, err := queue.rawToJob(raw)
-
-		if err != nil {
-			return err
-		}
-
-		err = queue.doProcessJob(job)
-
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.NewDelete().Model(&RawJob{}).Where("id = ?", job.Id).Exec(ctx)
-		return err
-	})
-
-	if err != nil {
-		println(err.Error())
+		c <- true
 	}
 }
 
@@ -191,31 +189,5 @@ func Initialize() error {
 		return err
 	}
 
-	return nil
-}
-
-func (queue Queue[T]) rawToJob(raw RawJob) (Job[T], error) {
-	job := Job[T]{
-		Id:        raw.Id,
-		Name:      raw.Name,
-		CreatedAt: raw.CreatedAt,
-		Tries:     raw.Tries,
-	}
-	value := new(T)
-	err := json.Unmarshal(raw.Payload, &value)
-	if err != nil {
-		return Job[T]{}, err
-	}
-	job.Payload = *value
-	return job, nil
-}
-
-func (queue Queue[T]) doProcessJob(job Job[T]) error {
-	for _, f := range queue.handlers {
-		err := f(job.Payload)
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }

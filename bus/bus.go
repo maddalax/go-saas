@@ -7,6 +7,7 @@ import (
 
 type Options struct {
 	AddDefaultMiddleware bool
+	Workers              int
 }
 
 func CreateWithOptions[T any, V any](opts Options) EventBus[T, V] {
@@ -14,7 +15,9 @@ func CreateWithOptions[T any, V any](opts Options) EventBus[T, V] {
 	if opts.AddDefaultMiddleware {
 		bus.addDefaultMiddleware()
 	}
-	bus.queue = job.CreateQueue[T]()
+	bus.queue = job.CreateQueue[T](job.CreateOptions{
+		Workers: opts.Workers,
+	})
 	go bus.queue.Listen()
 	return bus
 }
@@ -22,6 +25,7 @@ func CreateWithOptions[T any, V any](opts Options) EventBus[T, V] {
 func Create[T any, V any]() EventBus[T, V] {
 	return CreateWithOptions[T, V](Options{
 		AddDefaultMiddleware: true,
+		Workers:              25,
 	})
 }
 
