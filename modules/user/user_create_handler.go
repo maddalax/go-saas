@@ -16,7 +16,7 @@ type Book struct {
 }
 
 func EmailHandler(payload events.CreateUserPayload) error {
-	time.Sleep(time.Millisecond * 1000)
+	time.Sleep(time.Second * 3)
 	return nil
 }
 

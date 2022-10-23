@@ -2,11 +2,9 @@ package job
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"github.com/uptrace/bun"
-	"saas-starter/db"
 	"sync"
+	"time"
 )
 
 func createProcessor[T any](index int) Processor[T] {
@@ -26,50 +24,20 @@ func (processor Processor[T]) AddHandler(handler func(T) error) {
 	processor.handlerChan <- handler
 }
 
-func (processor Processor[T]) Start(process chan bool) {
+func (processor Processor[T]) Start(process chan RawJob) {
 	for {
 		select {
 		case h := <-processor.handlerChan:
-			println("appending handler")
 			processor.handlers = append(processor.handlers, h)
 			break
-		case _ = <-process:
-			processor.executeNextJob()
+		case raw := <-process:
+			job, err := processor.rawToJob(raw)
+			if err != nil {
+				continue
+			}
+			processor.doProcessJob(job, processor.handlers)
 			break
 		}
-	}
-}
-
-func (processor Processor[T]) executeNextJob() {
-	err := db.GetDatabase().RunInTx(context.Background(), &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
-		_, err := tx.Exec("BEGIN")
-		if err != nil {
-			return err
-		}
-		raw := RawJob{}
-		err = tx.NewRaw("SELECT * FROM jobs LIMIT 1 FOR UPDATE SKIP LOCKED;").Scan(ctx, &raw)
-		if err != nil {
-			return err
-		}
-
-		job, err := processor.rawToJob(raw)
-
-		if err != nil {
-			return err
-		}
-
-		err = processor.doProcessJob(job)
-
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.NewDelete().Model(&RawJob{}).Where("id = ?", job.Id).Exec(ctx)
-		return err
-	})
-
-	if err != nil {
-		println(err.Error())
 	}
 }
 
@@ -89,22 +57,41 @@ func (processor Processor[T]) rawToJob(raw RawJob) (Job[T], error) {
 	return job, nil
 }
 
-func (processor Processor[T]) doProcessJob(job Job[T]) error {
+func (processor Processor[T]) doProcessJob(job Job[T], handlers []func(payload T) error) {
+	println("processing job: %s", job.Id)
 	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
 
-	for _, f := range processor.handlers {
+	go func(cancel context.Context) {
+		// Ping the job every 30s
+		tick := time.NewTicker(time.Second * 30)
+		for {
+			select {
+			case _ = <-tick.C:
+				job.Ping()
+				tick.Reset(time.Second * 30)
+			case <-cancel.Done():
+				return
+			}
+		}
+	}(ctx)
+
+	// TODO should each handler be its own job ?
+	for _, f := range handlers {
 		wg.Add(1)
 		f := f
 		go func() {
 			defer wg.Done()
 			err := f(job.Payload)
 			if err != nil {
-				// TODO re-add to quue if failure
+				job.Fail()
 			}
 		}()
 	}
 
+	job.Ping()
 	wg.Wait()
-
-	return nil
+	println("finished job: %s", job.Id)
+	cancel()
+	job.Complete()
 }

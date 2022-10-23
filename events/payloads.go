@@ -5,5 +5,6 @@ type CreateUserPayload struct {
 }
 
 type UserCreatedPayload struct {
+	Id   string
 	Name string
 }

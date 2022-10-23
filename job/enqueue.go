@@ -3,7 +3,6 @@ package job
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/google/uuid"
 	"log"
 	"saas-starter/db"
@@ -47,7 +46,6 @@ func startEnqueueListener() {
 		go func() {
 			for {
 				request := <-processes
-				println(fmt.Sprintf("workerChannel: %d, workerSempahore: %d", len(processes), len(semaphore)))
 				serialized, err := json.Marshal(request.Payload)
 				if err != nil {
 					println(err.Error())
@@ -59,6 +57,8 @@ func startEnqueueListener() {
 					Payload:   serialized,
 					CreatedAt: time.Now().Format(time.RFC3339),
 					Tries:     0,
+					Status:    "pending",
+					LastPing:  time.Now().Format(time.RFC3339),
 				}
 				_, err = db.GetDatabase().NewInsert().Model(&job).Exec(context.Background())
 
